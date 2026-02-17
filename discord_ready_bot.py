@@ -41,7 +41,9 @@ class GameTracker:
             'ready_users': [],
             'timer_end': None,
             'channel_id': None,
-            'bot_admins': []  # List of user IDs who can use admin commands
+            'bot_admins': [],  # List of user IDs who can use admin commands
+            'timer_hours': 48,  # Default timer duration in hours
+            'timer_minutes': 0  # Additional minutes for timer
         }
     
     def initialize_players(self):
@@ -118,9 +120,25 @@ class GameTracker:
         self.save_data()
     
     def start_timer(self):
-        end_time = datetime.now() + timedelta(hours=48)
+        hours = self.data.get('timer_hours', 48)
+        minutes = self.data.get('timer_minutes', 0)
+        total_duration = timedelta(hours=hours, minutes=minutes)
+        end_time = datetime.now() + total_duration
         self.data['timer_end'] = end_time.isoformat()
         self.save_data()
+        return hours, minutes
+    
+    def set_timer_duration(self, hours, minutes=0):
+        """Set the timer duration"""
+        self.data['timer_hours'] = hours
+        self.data['timer_minutes'] = minutes
+        self.save_data()
+    
+    def get_timer_duration(self):
+        """Get the current timer duration setting"""
+        hours = self.data.get('timer_hours', 48)
+        minutes = self.data.get('timer_minutes', 0)
+        return hours, minutes
     
     def cancel_timer(self):
         self.data['timer_end'] = None
@@ -271,10 +289,11 @@ async def check_all_ready(ctx):
         tracker.cancel_timer()
         await ctx.send(f'🎉 Everyone is ready! Advancing to **Week {tracker.data["week"]}**!')
         await ctx.send('Ready status has been reset. Use !ready_name commands to ready up for the next week.')
-        # Automatically start the 48-hour timer for the next week
-        tracker.start_timer()
+        # Automatically start the timer for the next week
+        hours, minutes = tracker.start_timer()
         tracker.set_channel(ctx.channel.id)
-        await ctx.send('⏰ 48-hour timer automatically started for the next week!')
+        duration_text = f"{hours}h {minutes}m" if minutes > 0 else f"{hours}h"
+        await ctx.send(f'⏰ Timer automatically started for {duration_text}!')
 
 @bot.command(name='status', help='Check current game status')
 async def status(ctx):
@@ -304,12 +323,13 @@ async def status(ctx):
     
     await ctx.send(embed=embed)
 
-@bot.command(name='starttimer', help='Manually start the 48-hour timer (admin only)')
+@bot.command(name='starttimer', help='Manually start timer with current duration (admin only)')
 @is_admin()
 async def start_timer(ctx):
-    tracker.start_timer()
+    hours, minutes = tracker.start_timer()
     tracker.set_channel(ctx.channel.id)
-    await ctx.send('⏰ 48-hour timer started! (Note: Timer auto-starts when weeks advance)')
+    duration_text = f"{hours}h {minutes}m" if minutes > 0 else f"{hours}h"
+    await ctx.send(f'⏰ Timer started for {duration_text}! (Timer auto-restarts when weeks advance)')
 
 @bot.command(name='canceltimer', help='Cancel the active timer (admin only)')
 @is_admin()
@@ -333,6 +353,34 @@ async def set_week(ctx, week: int):
 async def reset_ready(ctx):
     tracker.reset_ready()
     await ctx.send('All ready statuses have been reset.')
+
+@bot.command(name='settimer', help='Set timer duration in hours and minutes (admin only)')
+@is_admin()
+async def set_timer(ctx, hours: int, minutes: int = 0):
+    """Set the timer duration - usage: !settimer 48 0 or !settimer 24 30"""
+    if hours < 0 or minutes < 0:
+        await ctx.send('❌ Hours and minutes must be positive numbers.')
+        return
+    
+    if hours == 0 and minutes == 0:
+        await ctx.send('❌ Timer must be at least 1 minute.')
+        return
+    
+    if minutes >= 60:
+        await ctx.send('❌ Minutes must be less than 60. Use hours for larger durations.')
+        return
+    
+    tracker.set_timer_duration(hours, minutes)
+    
+    duration_text = f"{hours}h {minutes}m" if minutes > 0 else f"{hours}h"
+    await ctx.send(f'✅ Timer duration set to {duration_text}. This will apply to all future timers.')
+
+@bot.command(name='gettimer', help='Show current timer duration setting')
+async def get_timer(ctx):
+    """Show what the timer duration is currently set to"""
+    hours, minutes = tracker.get_timer_duration()
+    duration_text = f"{hours}h {minutes}m" if minutes > 0 else f"{hours}h"
+    await ctx.send(f'⏰ Timer is currently set to: **{duration_text}**')
 
 @bot.command(name='addadmin', help='Add a bot admin (Discord admin only)')
 @commands.has_permissions(administrator=True)
@@ -385,10 +433,11 @@ async def help_ready(ctx):
     unready_cmds = "\n".join([f"`!unready_{name.lower()}`" for name in PLAYERS.values()])
     embed.add_field(name="", value=unready_cmds, inline=False)
     
-    embed.add_field(name="Other Commands", value="`!status` - Check game status\n`!listadmins` - See who can use admin commands", inline=False)
+    embed.add_field(name="Other Commands", value="`!status` - Check game status\n`!gettimer` - Show timer duration setting\n`!listadmins` - See who can use admin commands", inline=False)
     embed.add_field(name="**Admin Commands**", value="─────────────────", inline=False)
-    embed.add_field(name="!starttimer", value="Start 48-hour timer", inline=False)
+    embed.add_field(name="!starttimer", value="Start timer manually", inline=False)
     embed.add_field(name="!canceltimer", value="Cancel active timer", inline=False)
+    embed.add_field(name="!settimer <hours> <minutes>", value="Set timer duration (e.g., `!settimer 48 0` or `!settimer 24 30`)", inline=False)
     embed.add_field(name="!setweek <number>", value="Set week number", inline=False)
     embed.add_field(name="!resetready", value="Reset all ready statuses", inline=False)
     embed.add_field(name="**Server Admin Only**", value="─────────────────", inline=False)
@@ -411,14 +460,15 @@ async def check_timer():
                         not_ready.append(player_name)
                 
                 if not_ready:
-                    await channel.send(f'⏰ 48-hour timer expired! The following players were not ready: {", ".join(not_ready)}')
+                    await channel.send(f'⏰ Timer expired! The following players were not ready: {", ".join(not_ready)}')
                 
                 tracker.advance_week()
                 tracker.cancel_timer()
                 await channel.send(f'Advancing to **Week {tracker.data["week"]}**. Ready status has been reset.')
                 # Automatically start the timer for the next week
-                tracker.start_timer()
-                await channel.send('⏰ 48-hour timer automatically started for the next week!')
+                hours, minutes = tracker.start_timer()
+                duration_text = f"{hours}h {minutes}m" if minutes > 0 else f"{hours}h"
+                await channel.send(f'⏰ Timer automatically started for {duration_text}!')
 
 # Run the bot
 if __name__ == '__main__':
