@@ -40,7 +40,8 @@ class GameTracker:
             'week': 1,
             'ready_users': [],
             'timer_end': None,
-            'channel_id': None
+            'channel_id': None,
+            'bot_admins': []  # List of user IDs who can use admin commands
         }
     
     def initialize_players(self):
@@ -51,6 +52,30 @@ class GameTracker:
     def save_data(self):
         with open(DATA_FILE, 'w') as f:
             json.dump(self.data, f, indent=2)
+    
+    def is_bot_admin(self, user_id):
+        """Check if user is a bot admin or has Discord admin permissions"""
+        return str(user_id) in self.data.get('bot_admins', [])
+    
+    def add_bot_admin(self, user_id):
+        """Add a user as bot admin"""
+        user_id = str(user_id)
+        if 'bot_admins' not in self.data:
+            self.data['bot_admins'] = []
+        if user_id not in self.data['bot_admins']:
+            self.data['bot_admins'].append(user_id)
+            self.save_data()
+            return True
+        return False
+    
+    def remove_bot_admin(self, user_id):
+        """Remove a user from bot admins"""
+        user_id = str(user_id)
+        if user_id in self.data.get('bot_admins', []):
+            self.data['bot_admins'].remove(user_id)
+            self.save_data()
+            return True
+        return False
     
     def ready_up(self, player_name):
         """Mark a player as ready by their name"""
@@ -118,6 +143,20 @@ class GameTracker:
         self.save_data()
 
 tracker = GameTracker()
+
+def is_admin():
+    """Custom check for bot admins or Discord server admins"""
+    async def predicate(ctx):
+        # Check if user has Discord Administrator permission
+        if ctx.author.guild_permissions.administrator:
+            return True
+        # Check if user is in bot admin list
+        if tracker.is_bot_admin(ctx.author.id):
+            return True
+        # If neither, deny access
+        await ctx.send("❌ You need to be a server administrator or bot admin to use this command.")
+        return False
+    return commands.check(predicate)
 
 @bot.event
 async def on_ready():
@@ -232,6 +271,10 @@ async def check_all_ready(ctx):
         tracker.cancel_timer()
         await ctx.send(f'🎉 Everyone is ready! Advancing to **Week {tracker.data["week"]}**!')
         await ctx.send('Ready status has been reset. Use !ready_name commands to ready up for the next week.')
+        # Automatically start the 48-hour timer for the next week
+        tracker.start_timer()
+        tracker.set_channel(ctx.channel.id)
+        await ctx.send('⏰ 48-hour timer automatically started for the next week!')
 
 @bot.command(name='status', help='Check current game status')
 async def status(ctx):
@@ -261,21 +304,21 @@ async def status(ctx):
     
     await ctx.send(embed=embed)
 
-@bot.command(name='starttimer', help='Start the 48-hour timer (admin only)')
-@commands.has_permissions(administrator=True)
+@bot.command(name='starttimer', help='Manually start the 48-hour timer (admin only)')
+@is_admin()
 async def start_timer(ctx):
     tracker.start_timer()
     tracker.set_channel(ctx.channel.id)
-    await ctx.send('⏰ 48-hour timer started! If not everyone is ready when time expires, the week will advance automatically.')
+    await ctx.send('⏰ 48-hour timer started! (Note: Timer auto-starts when weeks advance)')
 
 @bot.command(name='canceltimer', help='Cancel the active timer (admin only)')
-@commands.has_permissions(administrator=True)
+@is_admin()
 async def cancel_timer(ctx):
     tracker.cancel_timer()
     await ctx.send('Timer cancelled.')
 
 @bot.command(name='setweek', help='Set the current week number (admin only)')
-@commands.has_permissions(administrator=True)
+@is_admin()
 async def set_week(ctx, week: int):
     if week < 1:
         await ctx.send('Week must be 1 or greater.')
@@ -286,10 +329,50 @@ async def set_week(ctx, week: int):
     await ctx.send(f'Week set to {week}.')
 
 @bot.command(name='resetready', help='Reset all ready statuses (admin only)')
-@commands.has_permissions(administrator=True)
+@is_admin()
 async def reset_ready(ctx):
     tracker.reset_ready()
     await ctx.send('All ready statuses have been reset.')
+
+@bot.command(name='addadmin', help='Add a bot admin (Discord admin only)')
+@commands.has_permissions(administrator=True)
+async def add_admin(ctx, member: discord.Member):
+    """Add someone as a bot admin - only Discord server admins can do this"""
+    if tracker.add_bot_admin(member.id):
+        await ctx.send(f'✅ {member.mention} has been added as a bot admin!')
+    else:
+        await ctx.send(f'{member.mention} is already a bot admin.')
+
+@bot.command(name='removeadmin', help='Remove a bot admin (Discord admin only)')
+@commands.has_permissions(administrator=True)
+async def remove_admin(ctx, member: discord.Member):
+    """Remove someone from bot admins - only Discord server admins can do this"""
+    if tracker.remove_bot_admin(member.id):
+        await ctx.send(f'❌ {member.mention} has been removed as a bot admin.')
+    else:
+        await ctx.send(f'{member.mention} was not a bot admin.')
+
+@bot.command(name='listadmins', help='List all bot admins')
+async def list_admins(ctx):
+    """Show who the bot admins are"""
+    admin_ids = tracker.data.get('bot_admins', [])
+    
+    if not admin_ids:
+        await ctx.send('No bot admins set. Only Discord server administrators can use admin commands.')
+        return
+    
+    admin_list = []
+    for user_id in admin_ids:
+        try:
+            user = await bot.fetch_user(int(user_id))
+            admin_list.append(f'• {user.name}')
+        except:
+            admin_list.append(f'• Unknown User ({user_id})')
+    
+    embed = discord.Embed(title="Bot Admins", color=discord.Color.gold())
+    embed.add_field(name="Users with bot admin access:", value="\n".join(admin_list), inline=False)
+    embed.add_field(name="Note", value="Discord server administrators also have admin access", inline=False)
+    await ctx.send(embed=embed)
 
 @bot.command(name='help_ready', help='Show all available commands')
 async def help_ready(ctx):
@@ -302,12 +385,15 @@ async def help_ready(ctx):
     unready_cmds = "\n".join([f"`!unready_{name.lower()}`" for name in PLAYERS.values()])
     embed.add_field(name="", value=unready_cmds, inline=False)
     
-    embed.add_field(name="Other Commands", value="`!status` - Check game status", inline=False)
+    embed.add_field(name="Other Commands", value="`!status` - Check game status\n`!listadmins` - See who can use admin commands", inline=False)
     embed.add_field(name="**Admin Commands**", value="─────────────────", inline=False)
     embed.add_field(name="!starttimer", value="Start 48-hour timer", inline=False)
     embed.add_field(name="!canceltimer", value="Cancel active timer", inline=False)
     embed.add_field(name="!setweek <number>", value="Set week number", inline=False)
     embed.add_field(name="!resetready", value="Reset all ready statuses", inline=False)
+    embed.add_field(name="**Server Admin Only**", value="─────────────────", inline=False)
+    embed.add_field(name="!addadmin @user", value="Give someone bot admin access", inline=False)
+    embed.add_field(name="!removeadmin @user", value="Remove bot admin access", inline=False)
     await ctx.send(embed=embed)
 
 @tasks.loop(minutes=5)
@@ -330,6 +416,9 @@ async def check_timer():
                 tracker.advance_week()
                 tracker.cancel_timer()
                 await channel.send(f'Advancing to **Week {tracker.data["week"]}**. Ready status has been reset.')
+                # Automatically start the timer for the next week
+                tracker.start_timer()
+                await channel.send('⏰ 48-hour timer automatically started for the next week!')
 
 # Run the bot
 if __name__ == '__main__':
